@@ -1,61 +1,147 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
-from pathlib import Path
+from typing import Literal, TypedDict, cast, overload
 
-from dotenv import dotenv_values
+from langgraph.graph import END, START, StateGraph
 
+from app.core.config import EnrichmentConfig
 from app.exceptions import AgentProviderError, AgentResponseError
+from app.llm.provider import LLMProvider
 from app.schemas.enrich import EnrichmentRequestSchema, EnrichmentResponseSchema
 
 
-DEFAULT_GEMINI_MODEL = "gemini/gemini-2.5-flash"
-DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
-MODEL_ENV_VARS = ("ENRICHMENT_MODEL", "LLM_MODEL", "GEMINI_MODEL")
-ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+class EnrichmentAgentState(TypedDict, total=False):
+    request: EnrichmentRequestSchema
+    enrichment: dict[str, object]
+    critique: dict[str, object]
+    attempts: int
 
 
 class EnrichmentAgent:
-    def __init__(self, model: str | None = None) -> None:
-        self._model_is_explicit = model is not None
-        self._process_env = {
-            env_var: os.getenv(env_var)
-            for env_var in (
-                *MODEL_ENV_VARS,
-                "OPENAI_API_KEY",
-                "GEMINI_API_KEY",
-                "GOOGLE_API_KEY",
-            )
-        }
-        self._file_env = dotenv_values(ENV_FILE)
-        self.model = model or self._configured_model()
+    def __init__(
+        self,
+        *,
+        model: str,
+        llm_provider: LLMProvider,
+        enrichment_config: EnrichmentConfig | None = None,
+        max_reflection_attempts: int = 1,
+    ) -> None:
+        self.model = model
+        self.llm_provider = llm_provider
+        self.enrichment_config = enrichment_config
+        self.max_reflection_attempts = max_reflection_attempts
+        self._graph = self._build_graph()
 
     def enrich(self, request: EnrichmentRequestSchema) -> EnrichmentResponseSchema:
-        self._validate_provider_config()
+        if self.enrichment_config:
+            self.enrichment_config.validate_provider_config(self.model)
 
         try:
-            import litellm
-
-            response = litellm.completion(
-                model=self.model,
-                messages=self._build_messages(request),
-                temperature=0.2,
-                response_format={"type": "json_object"},
-            )
+            final_state = self._graph.invoke({"request": request, "attempts": 0})
         except Exception as exc:
+            if isinstance(exc, AgentResponseError):
+                raise exc
             raise AgentProviderError(
                 f"LLM enrichment request failed for model {self.model!r}: {exc}"
             ) from exc
 
-        content = self._extract_content(response)
-        payload = self._parse_json(content)
+        payload = final_state.get("enrichment")
+        if not isinstance(payload, dict):
+            raise AgentResponseError("Enrichment agent did not produce JSON output.")
+
+        payload["product_code"] = request.product_code
 
         try:
             return EnrichmentResponseSchema.model_validate(payload)
         except Exception as exc:
             raise AgentResponseError("LLM returned an invalid enrichment schema.") from exc
+
+    def _build_graph(self):
+        graph = StateGraph(EnrichmentAgentState)
+        graph.add_node("enrich", self._enrich_node)
+        graph.add_node("reflect", self._reflect_node)
+        graph.add_node("revise", self._revise_node)
+        graph.add_edge(START, "enrich")
+        graph.add_edge("enrich", "reflect")
+        graph.add_conditional_edges(
+            "reflect",
+            self._reflection_route,
+            {"revise": "revise", "final": END},
+        )
+        graph.add_edge("revise", "reflect")
+        return graph.compile()
+
+    def _enrich_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+        request = self._require_state_value(state, "request")
+        response = self.llm_provider.complete(
+            model=self.model,
+            messages=self._build_messages(request),
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        payload = self._parse_json(self._extract_content(response))
+        return {"enrichment": payload, "attempts": state.get("attempts", 0)}
+
+    def _reflect_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+        request = self._require_state_value(state, "request")
+        enrichment = self._require_state_value(state, "enrichment")
+        response = self.llm_provider.complete(
+            model=self.model,
+            messages=self._build_reflection_messages(request, enrichment),
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+        critique = self._parse_json(self._extract_content(response))
+        return {"critique": critique}
+
+    def _revise_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+        request = self._require_state_value(state, "request")
+        enrichment = self._require_state_value(state, "enrichment")
+        critique = self._require_state_value(state, "critique")
+        response = self.llm_provider.complete(
+            model=self.model,
+            messages=self._build_revision_messages(request, enrichment, critique),
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        payload = self._parse_json(self._extract_content(response))
+        return {"enrichment": payload, "attempts": state.get("attempts", 0) + 1}
+
+    def _reflection_route(self, state: EnrichmentAgentState) -> Literal["revise", "final"]:
+        critique = state.get("critique", {})
+        approved = critique.get("approved") if isinstance(critique, dict) else False
+        attempts = state.get("attempts", 0)
+        if approved is True or attempts >= self.max_reflection_attempts:
+            return "final"
+
+        return "revise"
+
+    @overload
+    def _require_state_value(
+        self,
+        state: EnrichmentAgentState,
+        key: Literal["request"],
+    ) -> EnrichmentRequestSchema: ...
+
+    @overload
+    def _require_state_value(
+        self,
+        state: EnrichmentAgentState,
+        key: Literal["enrichment", "critique"],
+    ) -> dict[str, object]: ...
+
+    def _require_state_value(
+        self,
+        state: EnrichmentAgentState,
+        key: Literal["request", "enrichment", "critique"],
+    ) -> EnrichmentRequestSchema | dict[str, object]:
+        value = state.get(key)
+        if value is None:
+            raise AgentResponseError(f"Enrichment agent state is missing {key!r}.")
+
+        return cast(EnrichmentRequestSchema | dict[str, object], value)
 
     def _build_messages(self, request: EnrichmentRequestSchema) -> list[dict[str, str]]:
         product_json = request.model_dump_json(indent=2)
@@ -73,6 +159,61 @@ class EnrichmentAgent:
             {
                 "role": "user",
                 "content": f"Enrich this product:\n{product_json}",
+            },
+        ]
+
+    def _build_reflection_messages(
+        self,
+        request: EnrichmentRequestSchema,
+        enrichment: dict[str, object],
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "You judge product enrichment quality. Return JSON only with "
+                    "keys: approved, issues, revision_instructions. approved must be "
+                    "true only when product_code is unchanged, description is improved "
+                    "and marketplace-ready, and attributes are supported by the input."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Original product:\n"
+                    f"{request.model_dump_json(indent=2)}\n\n"
+                    "Candidate enrichment:\n"
+                    f"{json.dumps(enrichment, indent=2)}"
+                ),
+            },
+        ]
+
+    def _build_revision_messages(
+        self,
+        request: EnrichmentRequestSchema,
+        enrichment: dict[str, object],
+        critique: dict[str, object],
+    ) -> list[dict[str, str]]:
+        return [
+            {
+                "role": "system",
+                "content": (
+                    "Revise product enrichment using the critique. Return JSON only "
+                    "with exactly these top-level keys: product_code, description, "
+                    "attributes. Keep product_code unchanged and do not invent "
+                    "unsupported attributes."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Original product:\n"
+                    f"{request.model_dump_json(indent=2)}\n\n"
+                    "Candidate enrichment:\n"
+                    f"{json.dumps(enrichment, indent=2)}\n\n"
+                    "Critique:\n"
+                    f"{json.dumps(critique, indent=2)}"
+                ),
             },
         ]
 
@@ -123,68 +264,3 @@ class EnrichmentAgent:
             return stripped
 
         return "\n".join(lines[1:-1]).strip()
-
-    def _configured_model(self) -> str:
-        for env_var in MODEL_ENV_VARS:
-            value = self._clean_env_value(self._process_env.get(env_var))
-            if value:
-                return value
-
-        if self._clean_env_value(self._process_env.get("OPENAI_API_KEY")) and not (
-            self._clean_env_value(self._process_env.get("GEMINI_API_KEY"))
-            or self._clean_env_value(self._process_env.get("GOOGLE_API_KEY"))
-        ):
-            return DEFAULT_OPENAI_MODEL
-
-        for env_var in MODEL_ENV_VARS:
-            value = self._clean_env_value(self._file_env.get(env_var))
-            if value:
-                return value
-
-        if self._clean_env_value(self._file_env.get("OPENAI_API_KEY")) and not (
-            self._clean_env_value(self._file_env.get("GEMINI_API_KEY"))
-            or self._clean_env_value(self._file_env.get("GOOGLE_API_KEY"))
-        ):
-            return DEFAULT_OPENAI_MODEL
-
-        return DEFAULT_GEMINI_MODEL
-
-    def _validate_provider_config(self) -> None:
-        model_name = self.model.lower()
-
-        if model_name.startswith("gemini/") and not (
-            self._provider_config_value("GEMINI_API_KEY")
-            or self._provider_config_value("GOOGLE_API_KEY")
-        ):
-            raise AgentProviderError(
-                "No Gemini API key configured. Set GEMINI_API_KEY or GOOGLE_API_KEY, "
-                "or set ENRICHMENT_MODEL/LLM_MODEL to an OpenAI model and configure "
-                "OPENAI_API_KEY."
-            )
-
-        if (
-            (model_name.startswith("gpt-") or model_name.startswith("openai/"))
-            and not self._provider_config_value("OPENAI_API_KEY")
-        ):
-            raise AgentProviderError(
-                "No OpenAI API key configured. Set OPENAI_API_KEY, or set "
-                "ENRICHMENT_MODEL/LLM_MODEL to a provider with configured credentials."
-            )
-
-    def _provider_config_value(self, env_var: str) -> str | None:
-        if self._model_is_explicit:
-            return self._clean_env_value(self._process_env.get(env_var))
-
-        return self._config_value(env_var)
-
-    def _config_value(self, env_var: str) -> str | None:
-        return self._clean_env_value(self._process_env.get(env_var)) or self._clean_env_value(
-            self._file_env.get(env_var)
-        )
-
-    def _clean_env_value(self, value: str | None) -> str | None:
-        if not value:
-            return None
-
-        cleaned = value.strip().strip('"').strip("'")
-        return cleaned or None

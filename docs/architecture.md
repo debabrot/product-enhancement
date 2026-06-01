@@ -36,6 +36,10 @@ Structured Response
 
 /app
   main.py
+  dependencies.py
+
+  /core
+    config.py
 
   /api
     enrich.py
@@ -48,6 +52,9 @@ Structured Response
 
   /agents
     enrichment_agent.py
+  
+  /llm
+    provider.py
 
 /frontend
   app.py

@@ -1,6 +1,7 @@
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from app.dependencies import get_enrichment_service
 from app.exceptions import AgentProviderError, AgentResponseError, EnrichmentError
 from app.schemas.enrich import EnrichmentRequestSchema, EnrichmentResponseSchema
 from app.services.enrichment_service import EnrichmentService
@@ -8,10 +9,6 @@ from app.services.enrichment_service import EnrichmentService
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
-
-
-async def get_enrichment_service() -> EnrichmentService:
-    return EnrichmentService()
 
 
 @router.post("/enrich", response_model=EnrichmentResponseSchema)
