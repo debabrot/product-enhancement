@@ -4,12 +4,16 @@ import json
 from collections.abc import Mapping
 from typing import Literal, TypedDict, cast, overload
 
+import structlog
 from langgraph.graph import END, START, StateGraph
 
-from app.core.config import EnrichmentConfig
+from app.core.config import Config
 from app.exceptions import AgentProviderError, AgentResponseError
 from app.llm.provider import LLMProvider
 from app.schemas.enrich import EnrichmentRequestSchema, EnrichmentResponseSchema
+
+
+logger = structlog.get_logger(__name__)
 
 
 class EnrichmentAgentState(TypedDict, total=False):
@@ -23,28 +27,30 @@ class EnrichmentAgent:
     def __init__(
         self,
         *,
-        model: str,
         llm_provider: LLMProvider,
-        enrichment_config: EnrichmentConfig | None = None,
+        config: Config | None = None,
         max_reflection_attempts: int = 1,
     ) -> None:
-        self.model = model
         self.llm_provider = llm_provider
-        self.enrichment_config = enrichment_config
+        self.config = config
         self.max_reflection_attempts = max_reflection_attempts
         self._graph = self._build_graph()
 
-    def enrich(self, request: EnrichmentRequestSchema) -> EnrichmentResponseSchema:
-        if self.enrichment_config:
-            self.enrichment_config.validate_provider_config(self.model)
+    async def enrich(self, request: EnrichmentRequestSchema) -> EnrichmentResponseSchema:
+        logger.info(
+            "enrichment_agent_started",
+            product_code=request.product_code,
+            has_attributes=bool(request.attributes),
+            has_file_context=bool(request.additional_data_from_files),
+        )
 
         try:
-            final_state = self._graph.invoke({"request": request, "attempts": 0})
+            final_state = await self._graph.ainvoke({"request": request, "attempts": 0})
         except Exception as exc:
             if isinstance(exc, AgentResponseError):
                 raise exc
             raise AgentProviderError(
-                f"LLM enrichment request failed for model {self.model!r}: {exc}"
+                f"LLM enrichment request failed: {exc}"
             ) from exc
 
         payload = final_state.get("enrichment")
@@ -54,9 +60,18 @@ class EnrichmentAgent:
         payload["product_code"] = request.product_code
 
         try:
-            return EnrichmentResponseSchema.model_validate(payload)
+            response = EnrichmentResponseSchema.model_validate(payload)
         except Exception as exc:
             raise AgentResponseError("LLM returned an invalid enrichment schema.") from exc
+
+        logger.info(
+            "enrichment_agent_completed",
+            product_code=response.product_code,
+            description_length=len(response.description) if response.description else 0,
+            attribute_count=len(response.attributes) if response.attributes else 0,
+            total_attempts=final_state.get("attempts", 0),
+        )
+        return response
 
     def _build_graph(self):
         graph = StateGraph(EnrichmentAgentState)
@@ -73,49 +88,100 @@ class EnrichmentAgent:
         graph.add_edge("revise", "reflect")
         return graph.compile()
 
-    def _enrich_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+    async def _enrich_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
         request = self._require_state_value(state, "request")
-        response = self.llm_provider.complete(
-            model=self.model,
-            messages=self._build_messages(request),
-            temperature=0.2,
+        messages = self._build_messages(request)
+        logger.debug(
+            "enrichment_node_llm_request",
+            product_code=request.product_code,
+            message_count=len(messages),
+        )
+        response = await self.llm_provider.complete(
+            messages=messages,
             response_format={"type": "json_object"},
         )
-        payload = self._parse_json(self._extract_content(response))
+        content = self._extract_content(response)
+        payload = self._parse_json(content)
+        attributes = payload.get("attributes")
+        logger.debug(
+            "enrichment_node_llm_response",
+            product_code=request.product_code,
+            response_keys=list(payload.keys()),
+            attribute_count=len(attributes) if isinstance(attributes, (dict, list)) else 0,
+        )
         return {"enrichment": payload, "attempts": state.get("attempts", 0)}
 
-    def _reflect_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+    async def _reflect_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
         request = self._require_state_value(state, "request")
         enrichment = self._require_state_value(state, "enrichment")
-        response = self.llm_provider.complete(
-            model=self.model,
-            messages=self._build_reflection_messages(request, enrichment),
-            temperature=0.0,
+        messages = self._build_reflection_messages(request, enrichment)
+        logger.debug(
+            "reflect_node_llm_request",
+            product_code=request.product_code,
+            attempt=state.get("attempts", 0),
+        )
+        response = await self.llm_provider.complete(
+            messages=messages,
             response_format={"type": "json_object"},
         )
-        critique = self._parse_json(self._extract_content(response))
+        content = self._extract_content(response)
+        critique = self._parse_json(content)
+        issues = critique.get("issues")
+        logger.debug(
+            "reflect_node_llm_response",
+            product_code=request.product_code,
+            approved=critique.get("approved"),
+            issue_count=len(issues) if isinstance(issues, (dict, list)) else 0,
+        )
         return {"critique": critique}
 
-    def _revise_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
+    async def _revise_node(self, state: EnrichmentAgentState) -> EnrichmentAgentState:
         request = self._require_state_value(state, "request")
         enrichment = self._require_state_value(state, "enrichment")
         critique = self._require_state_value(state, "critique")
-        response = self.llm_provider.complete(
-            model=self.model,
-            messages=self._build_revision_messages(request, enrichment, critique),
-            temperature=0.2,
+        attempt = state.get("attempts", 0) + 1
+        messages = self._build_revision_messages(request, enrichment, critique)
+        logger.debug(
+            "revise_node_llm_request",
+            product_code=request.product_code,
+            attempt=attempt,
+            critique_issues=critique.get("issues"),
+        )
+        response = await self.llm_provider.complete(
+            messages=messages,
             response_format={"type": "json_object"},
         )
-        payload = self._parse_json(self._extract_content(response))
-        return {"enrichment": payload, "attempts": state.get("attempts", 0) + 1}
+        content = self._extract_content(response)
+        payload = self._parse_json(content)
+        logger.debug(
+            "revise_node_llm_response",
+            product_code=request.product_code,
+            attempt=attempt,
+            response_keys=list(payload.keys()),
+        )
+        return {"enrichment": payload, "attempts": attempt}
 
     def _reflection_route(self, state: EnrichmentAgentState) -> Literal["revise", "final"]:
         critique = state.get("critique", {})
         approved = critique.get("approved") if isinstance(critique, dict) else False
         attempts = state.get("attempts", 0)
         if approved is True or attempts >= self.max_reflection_attempts:
+            logger.debug(
+                "reflection_route_decision",
+                route="final",
+                approved=approved,
+                attempts=attempts,
+                max_reflection_attempts=self.max_reflection_attempts,
+            )
             return "final"
 
+        logger.debug(
+            "reflection_route_decision",
+            route="revise",
+            approved=approved,
+            attempts=attempts,
+            max_reflection_attempts=self.max_reflection_attempts,
+        )
         return "revise"
 
     @overload
@@ -144,7 +210,8 @@ class EnrichmentAgent:
         return cast(EnrichmentRequestSchema | dict[str, object], value)
 
     def _build_messages(self, request: EnrichmentRequestSchema) -> list[dict[str, str]]:
-        product_json = request.model_dump_json(indent=2)
+        product_json = self._request_prompt_json(request)
+        file_context = self._file_context_prompt(request)
         return [
             {
                 "role": "system",
@@ -158,7 +225,7 @@ class EnrichmentAgent:
             },
             {
                 "role": "user",
-                "content": f"Enrich this product:\n{product_json}",
+                "content": f"Enrich this product:\n{product_json}{file_context}",
             },
         ]
 
@@ -181,7 +248,8 @@ class EnrichmentAgent:
                 "role": "user",
                 "content": (
                     "Original product:\n"
-                    f"{request.model_dump_json(indent=2)}\n\n"
+                    f"{self._request_prompt_json(request)}"
+                    f"{self._file_context_prompt(request)}\n\n"
                     "Candidate enrichment:\n"
                     f"{json.dumps(enrichment, indent=2)}"
                 ),
@@ -208,7 +276,8 @@ class EnrichmentAgent:
                 "role": "user",
                 "content": (
                     "Original product:\n"
-                    f"{request.model_dump_json(indent=2)}\n\n"
+                    f"{self._request_prompt_json(request)}"
+                    f"{self._file_context_prompt(request)}\n\n"
                     "Candidate enrichment:\n"
                     f"{json.dumps(enrichment, indent=2)}\n\n"
                     "Critique:\n"
@@ -264,3 +333,16 @@ class EnrichmentAgent:
             return stripped
 
         return "\n".join(lines[1:-1]).strip()
+
+    def _request_prompt_json(self, request: EnrichmentRequestSchema) -> str:
+        payload = request.model_dump(exclude={"file", "additional_data_from_files"})
+        return json.dumps(payload, indent=2)
+
+    def _file_context_prompt(self, request: EnrichmentRequestSchema) -> str:
+        if not request.additional_data_from_files:
+            return ""
+
+        return (
+            "\n\nAdditional data from files:\n"
+            f"{request.additional_data_from_files}"
+        )

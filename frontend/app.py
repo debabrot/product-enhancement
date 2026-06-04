@@ -1,9 +1,11 @@
 import csv
 import json
 import os
+import uuid
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import BinaryIO
 
 import streamlit as st
 
@@ -37,12 +39,56 @@ def build_enrichment_payload(product: dict, instructions: str) -> dict:
     }
 
 
-def call_enrich_endpoint(url: str, payload: dict, timeout: int = 30) -> dict:
+def build_multipart_body(
+    payload: dict,
+    pdf_file: BinaryIO,
+    filename: str,
+) -> tuple[bytes, str]:
+    boundary = f"----product-enrichment-{uuid.uuid4().hex}"
+    payload_json = json.dumps(payload)
+    file_bytes = pdf_file.read()
+
+    parts = [
+        (
+            f"--{boundary}\r\n"
+            'Content-Disposition: form-data; name="payload"\r\n'
+            "Content-Type: application/json\r\n\r\n"
+            f"{payload_json}\r\n"
+        ).encode("utf-8"),
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            "Content-Type: application/pdf\r\n\r\n"
+        ).encode("utf-8"),
+        file_bytes,
+        f"\r\n--{boundary}--\r\n".encode("utf-8"),
+    ]
+
+    return b"".join(parts), f"multipart/form-data; boundary={boundary}"
+
+
+def call_enrich_endpoint(
+    url: str,
+    payload: dict,
+    timeout: int = 30,
+    pdf_file: BinaryIO | None = None,
+    filename: str | None = None,
+) -> dict:
+    headers = {"Content-Type": "application/json"}
     data = json.dumps(payload).encode("utf-8")
+
+    if pdf_file is not None:
+        data, content_type = build_multipart_body(
+            payload,
+            pdf_file,
+            filename or "uploaded.pdf",
+        )
+        headers = {"Content-Type": content_type}
+
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
 
@@ -84,15 +130,22 @@ def main() -> None:
         "Values",
         placeholder="Write enrichment instructions or values here",
     )
+    pdf_file = st.file_uploader("PDF", type=["pdf"])
 
     enrich_url = os.getenv("ENRICH_ENDPOINT_URL", DEFAULT_ENRICH_URL)
-    timeout = int(os.getenv("ENRICH_TIMEOUT_SECONDS", "30"))
+    timeout = int(os.getenv("ENRICH_TIMEOUT_SECONDS", "70"))
 
     if st.button("Enrich"):
         payload = build_enrichment_payload(selected_product, instructions)
         with st.spinner("Calling enrich endpoint..."):
             try:
-                enriched_data = call_enrich_endpoint(enrich_url, payload, timeout)
+                enriched_data = call_enrich_endpoint(
+                    enrich_url,
+                    payload,
+                    timeout,
+                    pdf_file=pdf_file,
+                    filename=pdf_file.name if pdf_file else None,
+                )
             except urllib.error.HTTPError as exc:
                 st.error(format_http_error(exc))
             except urllib.error.URLError as exc:

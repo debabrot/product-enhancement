@@ -1,3 +1,3 @@
-from app.llm.provider import LLMProvider, LiteLLMProvider
+from app.llm.provider import LLMProvider, LLMProviderProtocol
 
-__all__ = ["LLMProvider", "LiteLLMProvider"]
+__all__ = ["LLMProvider", "LLMProviderProtocol"]
