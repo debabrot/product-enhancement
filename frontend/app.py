@@ -11,7 +11,7 @@ import streamlit as st
 
 
 CSV_PATH = Path(__file__).with_name("products.csv")
-DEFAULT_ENRICH_URL = "http://localhost:8000/enrich"
+DEFAULT_ENRICH_URL = "http://api:8000/enrich"
 
 
 def load_products(csv_path: Path = CSV_PATH) -> list[dict]:

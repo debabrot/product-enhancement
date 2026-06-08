@@ -65,6 +65,14 @@ class Config(BaseSettings):
         default="DEBUG",
         validation_alias=AliasChoices("LOG_LEVEL", "log_level"),
     )
+    service_name: str = Field(
+        default="product-enhancement-api",
+        validation_alias=AliasChoices("OTEL_SERVICE_NAME", "otel_service_name"),
+    )
+    jaeger_endpoint: str = Field(
+        default="DEBUG",
+        validation_alias=AliasChoices("OTEL_EXPORTER_OTLP_ENDPOINT", "otel_exporter_otlp_endpoint"),
+    )
 
     @field_validator("*", mode="before")
     @classmethod

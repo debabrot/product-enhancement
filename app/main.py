@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.enrich import router as enrich_router
 from app.core.logging import logger
+from app.core.tracing import setup_tracing
+from app.dependencies import get_config
 
 
 @asynccontextmanager
@@ -25,7 +27,11 @@ def create_app() -> FastAPI:
         description="Agentic product enrichment pipeline",
         lifespan=lifespan,
     )
-    
+
+    # Set up config
+    config = get_config()
+    setup_tracing(app, config.service_name, config.jaeger_endpoint)
+
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
     app.include_router(enrich_router)
     logger.info("Enrich router successfully included.")

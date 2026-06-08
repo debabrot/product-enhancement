@@ -4,6 +4,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 from starlette.datastructures import UploadFile
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
 from app.dependencies import get_enrichment_service
 from app.exceptions import AgentProviderError, AgentResponseError, EnrichmentError
@@ -13,6 +15,7 @@ from app.services.enrichment_service import EnrichmentService
 
 router = APIRouter()
 logger = structlog.get_logger(__name__)
+tracer = trace.get_tracer(__name__)
 
 
 @router.post("/enrich", response_model=EnrichmentResponseSchema)
@@ -21,15 +24,26 @@ async def enrich_product(
     service: EnrichmentService = Depends(get_enrichment_service),
 ) -> EnrichmentResponseSchema:
     request = await _parse_enrichment_request(raw_request)
+
+    # Enrich the existing HTTP span with business context
+    current_span = trace.get_current_span()
+    current_span.set_attribute("product_code", request.product_code)
+    current_span.set_attribute("has_file", request.file is not None)
+
     try:
         response = await service.enrich(request)
         logger.info(
             "route_service_returned",
             product_code=response.product_code,
-            response=response.model_dump()
+            response=response.model_dump(),
         )
         return response
+
     except AgentProviderError as exc:
+        # Record the *original* exception on the span before converting to HTTPException
+        current_span.record_exception(exc)
+        current_span.set_status(Status(StatusCode.ERROR, "AgentProviderError"))
+
         logger.warning(
             "enrichment_provider_failed",
             product_code=request.product_code,
@@ -39,19 +53,26 @@ async def enrich_product(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
     except AgentResponseError as exc:
+        current_span.record_exception(exc)
+        current_span.set_status(Status(StatusCode.ERROR, "AgentResponseError"))
+
         logger.warning("enrichment_response_invalid", product_code=request.product_code)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
     except EnrichmentError as exc:
+        current_span.record_exception(exc)
+        current_span.set_status(Status(StatusCode.ERROR, "EnrichmentError"))
+
         logger.exception("enrichment_failed", product_code=request.product_code)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Product enrichment failed.",
         ) from exc
-
 
 async def _parse_enrichment_request(raw_request: Request) -> EnrichmentRequestSchema:
     content_type = raw_request.headers.get("content-type", "")

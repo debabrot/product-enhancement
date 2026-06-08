@@ -7,19 +7,19 @@ from app.llm.provider import LLMProvider, LLMProviderProtocol
 from app.services.enrichment_service import EnrichmentService
 
 
-async def get_enrichment_config() -> Config:
+def get_config() -> Config:
     return Config()
 
 
 async def get_gemini_llm_provider(
-    config: Config = Depends(get_enrichment_config),
+    config: Config = Depends(get_config),
 ) -> LLMProviderProtocol:
     return LLMProvider(
         model=config.gemini_model)
 
 
 async def get_openrouter_llm_provider(
-    config: Config = Depends(get_enrichment_config),
+    config: Config = Depends(get_config),
 ) -> LLMProvider:
     return LLMProvider(
         model=config.openrouter_llm_model
@@ -27,7 +27,7 @@ async def get_openrouter_llm_provider(
 
 
 async def get_enrichment_agent(
-    config: Config = Depends(get_enrichment_config),
+    config: Config = Depends(get_config),
     llm_provider: LLMProvider = Depends(get_openrouter_llm_provider),
 ) -> EnrichmentAgent:
     return EnrichmentAgent(
@@ -37,7 +37,7 @@ async def get_enrichment_agent(
 
 
 async def get_retrieval_agent(
-    config: Config = Depends(get_enrichment_config),
+    config: Config = Depends(get_config),
     llm_provider: LLMProvider = Depends(get_openrouter_llm_provider),
 ) -> RetrievalAgent:
     return RetrievalAgent(
