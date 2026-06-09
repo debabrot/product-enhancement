@@ -6,7 +6,7 @@ Build a minimal Product Enrichment POC using:
 - Streamlit frontend
 - FastAPI backend
 - Pydantic schemas
-- Simple LangChain enrichment flow
+- LangGraph enrichment flow
 
 The system should:
 1. Accept a product selection
@@ -20,15 +20,24 @@ This is intentionally lightweight and not production-ready.
 
 # High-Level Flow
 
-Frontend (Streamlit)
-    ->
+```text
+Streamlit Frontend
+        │
+        ▼
 FastAPI /enrich
-    ->
+        │
+        ▼
 Enrichment Service
-    ->
-LangChain Bot
-    ->
-Structured Response
+        │
+        ▼
+LangGraph Workflow
+        │
+        ├── Retrieval Agent
+        └── Enrichment Agent
+        │
+        ▼
+Structured Enriched Output
+```
 
 ---
 
@@ -37,9 +46,12 @@ Structured Response
 /app
   main.py
   dependencies.py
+  exceptions.py
 
   /core
     config.py
+    logging.py
+    tracing.py
 
   /api
     enrich.py
@@ -52,15 +64,15 @@ Structured Response
 
   /agents
     enrichment_agent.py
+    retrieval_agent.py
   
   /llm
     provider.py
 
 /frontend
   app.py
-
-/data
-  products.csv
+  /data
+    demo_products.csv
 
 ---
 
@@ -81,4 +93,4 @@ The frontend should call the backend `/enrich` endpoint.
 Store sample products in:
 
 ```text
-/data/products.csv
+frontend/data/demo_products.csv

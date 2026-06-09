@@ -43,9 +43,7 @@ class EnrichmentService:
                 # Nested child span: file retrieval
                 with tracer.start_as_current_span("enrichment_service.retrieval") as retrieval_span:
                     retrieval_span.set_attribute("file_name", request.file.filename if hasattr(request.file, "filename") else "unknown")
-                    
                     additional_data_from_files = await self.retrieval_agent.retrieve(request)
-                    
                     retrieval_span.set_attribute("retrieval_success", True)
                     logger.debug("enrichment_service_retrieval_completed")
 

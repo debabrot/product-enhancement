@@ -336,7 +336,7 @@ class EnrichmentAgent:
 
     def _request_prompt_json(self, request: EnrichmentRequestSchema) -> str:
         payload = request.model_dump(exclude={"file", "additional_data_from_files"})
-        return json.dumps(payload, indent=2)
+        return json.dumps(payload, separators=(",", ":"))
 
     def _file_context_prompt(self, request: EnrichmentRequestSchema) -> str:
         if not request.additional_data_from_files:

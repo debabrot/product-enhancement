@@ -225,7 +225,7 @@ class RetrievalAgent:
 
     def _request_prompt_json(self, request: EnrichmentRequestSchema) -> str:
         payload = request.model_dump(exclude={"file", "additional_data_from_files"})
-        return json.dumps(payload, indent=2)
+        return json.dumps(payload, separators=(",", ":"))
 
     def _extract_content(self, response: object) -> str:
         if isinstance(response, Mapping):

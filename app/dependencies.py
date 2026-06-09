@@ -11,16 +11,9 @@ def get_config() -> Config:
     return Config()
 
 
-async def get_gemini_llm_provider(
-    config: Config = Depends(get_config),
-) -> LLMProviderProtocol:
-    return LLMProvider(
-        model=config.gemini_model)
-
-
 async def get_openrouter_llm_provider(
     config: Config = Depends(get_config),
-) -> LLMProvider:
+) -> LLMProviderProtocol:
     return LLMProvider(
         model=config.openrouter_llm_model
 )

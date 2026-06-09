@@ -88,13 +88,27 @@ System should return:
 - confidence/explanation (optional)
 
 ---
+## 5. Multi-agent Orchestration
+
+Current:
+- Retrieval Agent
+- Enrichment Agent
+- PDF document ingestion
+
+Future:
+- Additional validation/scoring agents
+
+---
+
+
+
 
 # Example Workflow
 
 Input:
-- Product title
-- Existing description
+- User selects a product from sample product data.
 - Additional text by the user
+- Additional document by the user
 
 Processing:
 - Validate user text
@@ -140,22 +154,11 @@ Current stack:
 ## Human-in-the-loop review
 Allow approval/rejection of enrichments.
 
-## Support document ingestion
-Allow PDF/DOC ingestion.
-
 ## Persistent storage
 Store enrichment history.
 
 ## Evaluation framework
 Measure enrichment quality.
-
-## Multi-agent orchestration
-Separate:
-- retrieval
-- validation
-- enrichment
-- scoring agents
-
 ---
 
 # Suggested Architecture
@@ -167,11 +170,13 @@ Backend:
 - Fast API
 - LangGraph orchestration
 
-Agents:
-- Input validation
-- Retrieval
-- Enrichment
-- Validation
+Current Agents:
+- Retrieval Agent
+- Enrichment Agent
+
+Future Agents:
+- Validation Agent
+- Scoring Agent
 
 LLM:
 - Abstraction will be used for api provider.

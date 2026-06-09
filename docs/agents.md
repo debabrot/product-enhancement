@@ -22,7 +22,7 @@ Python 3.11, FastAPI, LangGraph, LangChain, Streamlit, Pydantic v2
 - Business logic belongs in services/workflows only
 - Repository layer handles data access only
 - Typed returns everywhere — no `Any`
-- Raise domain exceptions from `src/exceptions.py`
+- Raise domain exceptions from `app/exceptions.py`
 - Never return error dicts
 - Use structlog, never print()
 - No new dependencies without approval
@@ -38,9 +38,9 @@ Current implementation supports:
 - single enrichment workflow
 - user-provided context
 - structured response generation
+- multi-agent orchestration
 
 Not yet implemented:
-- multi-agent orchestration
 - vector databases
 - human review
 - persistent storage

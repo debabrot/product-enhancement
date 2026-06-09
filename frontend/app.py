@@ -10,7 +10,7 @@ from typing import BinaryIO
 import streamlit as st
 
 
-CSV_PATH = Path(__file__).with_name("products.csv")
+CSV_PATH = Path(__file__).parent / "data" / "demo_products.csv"
 DEFAULT_ENRICH_URL = "http://api:8000/enrich"
 
 
