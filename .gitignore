@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Other folders
+__pre_docs__
+.agents
+.codex

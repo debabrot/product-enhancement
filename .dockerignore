@@ -1,0 +1,38 @@
+# Version control
+.git
+.gitignore
+
+# Python artifacts
+__pycache__
+*.py[cod]
+*.pyo
+.mypy_cache
+.ruff_cache
+.pytest_cache
+htmlcov
+.coverage
+
+# uv / virtual envs
+.venv
+.uv
+
+# Dev / editor
+.vscode
+.idea
+*.env.local
+*.env.*.local
+
+# Secrets — always exclude
+.env
+
+# Docs & tests (not needed in image)
+docs/
+tests/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Docker files themselves (avoid recursive confusion)
+Dockerfile*
+docker-compose*.yml
